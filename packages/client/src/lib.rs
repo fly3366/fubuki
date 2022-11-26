@@ -1,5 +1,9 @@
+#[macro_use]
+extern crate log;
+
 use std::mem::MaybeUninit;
-use std::net::{Ipv4Addr, UdpSocket};
+use std::net::{Ipv4Addr, UdpSocket, IpAddr, SocketAddr, ToSocketAddrs};
+use std::str::FromStr;
 use std::sync::atomic::{AtomicI64, AtomicU32, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -9,6 +13,7 @@ use anyhow::{anyhow, Context};
 use chrono::Utc;
 use futures_util::FutureExt;
 use parking_lot::RwLock;
+use serde::Deserialize;
 use tokio::io::BufReader;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::error::TrySendError;
@@ -17,15 +22,14 @@ use tokio::time;
 
 pub use api::{call, Req};
 
-use crate::client::api::api_start;
-use crate::common::cipher::XorCipher;
-use crate::common::net::msg_operator::{TcpMsgReader, TcpMsgWriter, TCP_BUFF_SIZE, UDP_BUFF_SIZE};
-use crate::common::net::proto::{HeartbeatType, MsgResult, Node, NodeId, TcpMsg, UdpMsg};
-use crate::common::net::{proto, SocketExt};
-use crate::common::{HashMap, HashSet, MapInit, SetInit};
-use crate::abs_tun::TunDevice;
-use crate::abs_tun::{create_device, skip_error};
-use crate::{ClientConfigFinalize, NetworkRangeFinalize, TunIpAddr};
+use crate::api::api_start;
+use common::cipher::XorCipher;
+use common::net::msg_operator::{TcpMsgReader, TcpMsgWriter, TCP_BUFF_SIZE, UDP_BUFF_SIZE};
+use common::net::proto::{HeartbeatType, MsgResult, Node, NodeId, TcpMsg, UdpMsg, ProtocolMode};
+use common::net::{proto, SocketExt, get_interface_addr};
+use common::{HashMap, HashSet, MapInit, SetInit, ternary};
+use abs_tun::TunDevice;
+use abs_tun::{create_device, skip_error, TunIpAddr};
 
 mod api;
 
@@ -33,6 +37,8 @@ static mut LOCAL_NODE_ID: NodeId = 0;
 static mut CONFIG: MaybeUninit<ClientConfigFinalize> = MaybeUninit::uninit();
 static mut INTERFACE_MAP: MaybeUninit<InterfaceMap> = MaybeUninit::uninit();
 static mut DIRECT_NODE_LIST: MaybeUninit<DirectNodeList> = MaybeUninit::uninit();
+
+
 
 fn set_local_node_id(id: NodeId) {
     unsafe { LOCAL_NODE_ID = id }
@@ -64,6 +70,136 @@ fn get_interface_map() -> &'static InterfaceMap {
 
 fn get_direct_node_list() -> &'static DirectNodeList {
     unsafe { DIRECT_NODE_LIST.assume_init_ref() }
+}
+
+
+#[derive(Clone)]
+pub struct NetworkRangeFinalize {
+    server_addr: String,
+    tun: TunIpAddr,
+    key: XorCipher,
+    mode: ProtocolMode,
+    lan_ip_addr: Option<IpAddr>,
+    try_send_to_lan_addr: bool,
+}
+
+#[derive(Deserialize, Clone)]
+struct NetworkRange {
+    server_addr: String,
+    tun: TunIpAddr,
+    key: String,
+    mode: Option<String>,
+    lan_ip_addr: Option<IpAddr>,
+    try_send_to_lan_addr: Option<bool>,
+}
+
+#[derive(Deserialize, Clone)]
+pub struct ClientConfig {
+    mtu: Option<usize>,
+    channel_limit: Option<usize>,
+    api_addr: Option<SocketAddr>,
+    tcp_heartbeat_interval_secs: Option<u64>,
+    udp_heartbeat_interval_secs: Option<u64>,
+    reconnect_interval_secs: Option<u64>,
+    udp_socket_recv_buffer_size: Option<usize>,
+    udp_socket_send_buffer_size: Option<usize>,
+    tun_handler_thread_count: Option<usize>,
+    udp_handler_thread_count: Option<usize>,
+    network_ranges: Vec<NetworkRange>,
+}
+
+#[derive(Clone)]
+pub struct ClientConfigFinalize {
+    mtu: usize,
+    channel_limit: usize,
+    api_addr: SocketAddr,
+    tcp_heartbeat_interval: Duration,
+    udp_heartbeat_interval: Duration,
+    reconnect_interval: Duration,
+    udp_socket_recv_buffer_size: Option<usize>,
+    udp_socket_send_buffer_size: Option<usize>,
+    tun_handler_thread_count: usize,
+    udp_handler_thread_count: usize,
+    network_ranges: Vec<NetworkRangeFinalize>,
+}
+
+
+
+impl TryFrom<ClientConfig> for ClientConfigFinalize {
+    type Error = anyhow::Error;
+
+    fn try_from(config: ClientConfig) -> Result<Self> {
+        let mut ranges = Vec::with_capacity(config.network_ranges.len());
+
+        for range in config.network_ranges {
+            let mode = ProtocolMode::from_str(range.mode.as_deref().unwrap_or("UDP_AND_TCP"))?;
+
+            let resolve_server_addr = range
+                .server_addr
+                .to_socket_addrs()?
+                .next()
+                .ok_or_else(|| anyhow!("Server host not found"))?;
+
+            let lan_ip_addr = match range.lan_ip_addr {
+                None => {
+                    if mode.udp_support() {
+                        let lan_addr = get_interface_addr(resolve_server_addr)?;
+                        Some(lan_addr)
+                    } else {
+                        None
+                    }
+                }
+                Some(addr) => {
+                    if addr.is_loopback() {
+                        return Err(anyhow!("LAN address cannot be a loopback address"));
+                    }
+
+                    if addr.is_unspecified() {
+                        return Err(anyhow!("LAN address cannot be unspecified address"));
+                    }
+                    Some(addr)
+                }
+            };
+
+            let range_finalize = NetworkRangeFinalize {
+                server_addr: {
+                    if resolve_server_addr.ip().is_loopback() {
+                        return Err(anyhow!("Server address cannot be a loopback address"));
+                    }
+                    range.server_addr
+                },
+                tun: range.tun,
+                key: XorCipher::new(range.key.as_bytes()),
+                mode,
+                lan_ip_addr,
+                try_send_to_lan_addr: range.try_send_to_lan_addr.unwrap_or(false),
+            };
+            ranges.push(range_finalize)
+        }
+
+        let config_finalize = ClientConfigFinalize {
+            mtu: config.mtu.unwrap_or(1462),
+            channel_limit: config.channel_limit.unwrap_or(100),
+            api_addr: config
+                .api_addr
+                .unwrap_or_else(|| SocketAddr::from((Ipv4Addr::LOCALHOST, 3030))),
+            tcp_heartbeat_interval: config
+                .tcp_heartbeat_interval_secs
+                .map(|sec| Duration::from_secs(ternary!(sec > 10, 10, sec)))
+                .unwrap_or(Duration::from_secs(5)),
+            udp_heartbeat_interval: config
+                .udp_heartbeat_interval_secs
+                .map(|sec| Duration::from_secs(ternary!(sec > 10, 10, sec)))
+                .unwrap_or(Duration::from_secs(5)),
+            reconnect_interval: Duration::from_secs(config.reconnect_interval_secs.unwrap_or(3)),
+            udp_socket_recv_buffer_size: config.udp_socket_recv_buffer_size,
+            udp_socket_send_buffer_size: config.udp_socket_send_buffer_size,
+            tun_handler_thread_count: config.tun_handler_thread_count.unwrap_or(1),
+            udp_handler_thread_count: config.udp_handler_thread_count.unwrap_or(1),
+            network_ranges: ranges,
+        };
+        Ok(config_finalize)
+    }
 }
 
 struct InterfaceInfo<Map> {
@@ -801,7 +937,7 @@ async fn tcp_handler<T: TunDevice + 'static>(
     Ok(())
 }
 
-pub(super) async fn start(config: ClientConfigFinalize) -> Result<()> {
+pub async fn start(config: ClientConfigFinalize) -> Result<()> {
     set_local_node_id(rand::random());
     set_config(config);
 

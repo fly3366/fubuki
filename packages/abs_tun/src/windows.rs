@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use simple_wintun::adapter::{WintunAdapter, WintunStream};
 
-use crate::tun::TunDevice;
+use crate::TunDevice;
 use crate::TunIpAddr;
 
 const ADAPTER_NAME: &str = "Wintun";

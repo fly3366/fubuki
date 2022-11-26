@@ -1,7 +1,8 @@
 use std::io::{Error, Result};
+use std::net::{Ipv4Addr};
 use std::sync::Arc;
 
-use crate::TunIpAddr;
+use serde::Deserialize;
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -9,6 +10,13 @@ mod linux;
 mod macos;
 #[cfg(target_os = "windows")]
 mod windows;
+
+
+#[derive(Deserialize, Clone)]
+pub struct TunIpAddr {
+    pub ip: Ipv4Addr,
+    pub netmask: Ipv4Addr,
+}
 
 pub trait TunDevice: Send + Sync {
     fn send_packet(&self, packet: &[u8]) -> Result<()>;
@@ -26,7 +34,7 @@ impl<T: TunDevice> TunDevice for Arc<T> {
     }
 }
 
-pub(crate) fn create_device(mtu: usize, ip_addrs: &[TunIpAddr]) -> Result<impl TunDevice> {
+pub fn create_device(mtu: usize, ip_addrs: &[TunIpAddr]) -> Result<impl TunDevice> {
     #[cfg(target_os = "windows")]
     {
         windows::Wintun::create(mtu, ip_addrs)
@@ -41,7 +49,7 @@ pub(crate) fn create_device(mtu: usize, ip_addrs: &[TunIpAddr]) -> Result<impl T
     }
 }
 
-pub(crate) fn skip_error(err: &Error) -> bool {
+pub fn skip_error(err: &Error) -> bool {
     if cfg!(target_os = "linux") {
         const INVALID_ARGUMENT: i32 = 22;
         err.raw_os_error() == Some(INVALID_ARGUMENT)

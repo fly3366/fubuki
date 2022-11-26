@@ -1,3 +1,6 @@
+#[macro_use]
+extern crate log;
+
 use std::mem::MaybeUninit;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
@@ -6,6 +9,8 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
+use common::net::SocketExt;
+use serde::Deserialize;
 use parking_lot::RwLock;
 use tokio::io::BufReader;
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
@@ -14,12 +19,10 @@ use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{mpsc, watch};
 use tokio::{sync, time};
 
-use crate::common::cipher::XorCipher;
-use crate::common::net::msg_operator::{TcpMsgReader, TcpMsgWriter, UdpMsgSocket, TCP_BUFF_SIZE};
-use crate::common::net::proto::{HeartbeatType, MsgResult, Node, NodeId, TcpMsg, UdpMsg};
-use crate::common::net::SocketExt;
-use crate::common::{HashMap, MapInit};
-use crate::{Listener, ServerConfigFinalize};
+use common::cipher::XorCipher;
+use common::net::msg_operator::{TcpMsgReader, TcpMsgWriter, UdpMsgSocket, TCP_BUFF_SIZE};
+use common::net::proto::{HeartbeatType, MsgResult, Node, NodeId, TcpMsg, UdpMsg};
+use common::{HashMap, MapInit, ternary};
 
 static mut CONFIG: MaybeUninit<ServerConfigFinalize> = MaybeUninit::uninit();
 
@@ -174,6 +177,52 @@ async fn udp_handler(listen_addr: SocketAddr, key: XorCipher, node_db: Arc<NodeD
     }
 }
 
+
+#[derive(Deserialize, Clone)]
+pub struct Listener {
+    listen_addr: SocketAddr,
+    key: String,
+}
+
+
+#[derive(Deserialize, Clone)]
+pub struct ServerConfig {
+    channel_limit: Option<usize>,
+    tcp_heartbeat_interval_secs: Option<u64>,
+    listeners: Vec<Listener>,
+}
+
+impl TryFrom<ServerConfig> for ServerConfigFinalize {
+    type Error = anyhow::Error;
+
+    fn try_from(config: ServerConfig) -> Result<Self> {
+        let config_finalize = Self {
+            channel_limit: config.channel_limit.unwrap_or(100),
+            tcp_heartbeat_interval: config
+                .tcp_heartbeat_interval_secs
+                .map(|sec| Duration::from_secs(ternary!(sec > 10, 10, sec)))
+                .unwrap_or(Duration::from_secs(5)),
+            listeners: {
+                for listener in &config.listeners {
+                    if listener.listen_addr.ip().is_loopback() {
+                        return Err(anyhow!("Listen address cannot be a loopback address"));
+                    }
+                }
+                config.listeners
+            },
+        };
+
+        Ok(config_finalize)
+    }
+}
+
+#[derive(Clone)]
+pub struct ServerConfigFinalize {
+    channel_limit: usize,
+    tcp_heartbeat_interval: Duration,
+    listeners: Vec<Listener>,
+}
+
 async fn tcp_handler(listen_addr: SocketAddr, key: XorCipher, node_db: Arc<NodeDb>) -> Result<()> {
     let listener = TcpListener::bind(listen_addr)
         .await
@@ -301,7 +350,7 @@ async fn tunnel(mut stream: TcpStream, key: XorCipher, node_db: Arc<NodeDb>) -> 
     Ok(())
 }
 
-pub(super) async fn start(server_config: ServerConfigFinalize) {
+pub async fn start(server_config: ServerConfigFinalize) {
     set_config(server_config);
     let mut list = Vec::with_capacity(get_config().listeners.len());
 

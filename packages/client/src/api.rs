@@ -8,11 +8,11 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
-use crate::client::{get_direct_node_list, get_interface_map, get_local_node_id};
-use crate::common::net::proto::{Node, NodeId};
-use crate::common::{HashMap, MapInit};
+use crate::{get_direct_node_list, get_interface_map, get_local_node_id};
+use common::net::proto::{Node, NodeId};
+use common::{HashMap, MapInit};
 
-use crate::common::persistence::ToJson;
+use common::persistence::ToJson;
 
 #[derive(Clone, Serialize, Deserialize)]
 struct Extends {
