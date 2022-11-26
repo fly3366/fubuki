@@ -23,8 +23,8 @@ use crate::common::net::msg_operator::{TcpMsgReader, TcpMsgWriter, TCP_BUFF_SIZE
 use crate::common::net::proto::{HeartbeatType, MsgResult, Node, NodeId, TcpMsg, UdpMsg};
 use crate::common::net::{proto, SocketExt};
 use crate::common::{HashMap, HashSet, MapInit, SetInit};
-use crate::tun::TunDevice;
-use crate::tun::{create_device, skip_error};
+use crate::abs_tun::TunDevice;
+use crate::abs_tun::{create_device, skip_error};
 use crate::{ClientConfigFinalize, NetworkRangeFinalize, TunIpAddr};
 
 mod api;

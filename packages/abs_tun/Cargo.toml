@@ -1,0 +1,12 @@
+[package]
+name = "abs_tun"
+version = "0.4.6"
+authors = ["xty <xutianyi1999@live.com>"]
+edition = "2021"
+
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+tun = "0.5"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+tun = "0.5"
+simple_wintun = { git = "https://github.com/xutianyi1999/SimpleWintun.git" }

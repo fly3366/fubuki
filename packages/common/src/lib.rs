@@ -1,3 +1,4 @@
+#![feature(portable_simd)]
 pub mod cipher;
 pub mod net;
 pub mod persistence;

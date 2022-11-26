@@ -1,5 +1,3 @@
-#![feature(portable_simd)]
-
 #[macro_use]
 extern crate log;
 
@@ -23,11 +21,6 @@ use crate::client::Req;
 use crate::common::cipher::XorCipher;
 use crate::common::net::get_interface_addr;
 use crate::common::net::proto::ProtocolMode;
-
-mod client;
-mod common;
-mod server;
-mod tun;
 
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
