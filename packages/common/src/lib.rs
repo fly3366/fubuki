@@ -2,7 +2,6 @@
 pub mod cipher;
 pub mod net;
 pub mod persistence;
-pub mod config;
 
 #[macro_export]
 macro_rules! ternary {
